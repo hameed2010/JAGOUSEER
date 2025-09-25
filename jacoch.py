@@ -67,7 +67,7 @@ def launch_browser():
         p = sync_playwright().start()
         browser = p.chromium.launch_persistent_context(
             user_data_dir=USER_DATA_DIR,
-            headless=True,
+            headless=False,
             viewport={"width": 1280, "height": 800},
             java_script_enabled=True,
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -173,7 +173,7 @@ def get_check_status(page, user_value):
         return {}
 
 # ---------------- Database Functions ----------------
-def create_db_connection(retries=5, wait=3600):
+def create_db_connection(retries=5, wait=5):
     for attempt in range(retries):
         try:
             conn = mysql.connector.connect(
@@ -184,16 +184,17 @@ def create_db_connection(retries=5, wait=3600):
                 connection_timeout=10
             )
             if conn.is_connected():
-                log("🟢 Database connected successfully")
+                log(f"🟢 Database connected successfully on attempt {attempt+1}")
                 return conn
         except Error as e:
             log(f"❌ Database connection error (attempt {attempt+1}/{retries}): {e}")
+            print(traceback.format_exc())
             time.sleep(wait)
     log("❌ Failed to connect to DB after multiple attempts.")
     return None
 
 def fetch_users_from_db(conn, limit=10):
-    if conn is None:
+    if conn is None or not conn.is_connected():
         log("❌ No DB connection available for fetching users")
         return []
 
@@ -202,19 +203,38 @@ def fetch_users_from_db(conn, limit=10):
         cursor.execute(f"SELECT * FROM users_jaco WHERE status='new' LIMIT {limit};")
         rows = cursor.fetchall()
         cursor.close()
+        log(f"🟢 Fetched {len(rows)} users from DB")
         return rows
     except Error as e:
         log(f"❌ Error fetching users from DB: {e}")
+        print(traceback.format_exc())
         return []
 
 def update_user_status(conn, username, data):
-    if conn is None:
+    if conn is None or not conn.is_connected():
         log(f"❌ No DB connection available to update user {username}")
+        return
+
+    # إذا كانت البيانات ليست dict أو فارغة
+    if not isinstance(data, dict) or not data:
+        log(f"⚠️ بيانات غير صالحة أو فارغة للمستخدم {username}: {data}")
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE users_jaco SET status='invalid' WHERE username=%s",
+                (username,)
+            )
+            conn.commit()
+            cursor.close()
+            log(f"✅ تم تحديث المستخدم {username} إلى status='invalid'.")
+        except Error as e:
+            log(f"❌ Error updating user {username} to invalid: {e}")
         return
 
     try:
         cursor = conn.cursor()
         required_keys = ["signed", "quality_anchor", "revenue_limit", "invite_limit"]
+        # تحقق من كل مفتاح في dict
         if all(data.get(k, 1) == 0 for k in required_keys):
             cursor.execute(
                 "UPDATE users_jaco SET availability='available', status='verified' WHERE username=%s",
@@ -231,6 +251,7 @@ def update_user_status(conn, username, data):
         cursor.close()
     except Error as e:
         log(f"❌ Error updating user {username}: {e}")
+        log(traceback.format_exc())
 
 # ---------------- Main Program ----------------
 def main():
@@ -238,44 +259,45 @@ def main():
     p, browser = launch_browser()
     page = open_page(browser, "https://mcn.jaco.live/auth/sign-in")
 
+    if not conn:
+        log("❌ Exiting program: DB connection failed.")
+        return
+    if not browser or not page:
+        log("❌ Exiting program: Browser/page did not open.")
+        return
+
+    ensure_login(page)
+    click_invite_streamer(page)
+
     while True:
         try:
-            log("🟢 Starting main script...")
-            if not browser or not page:
-                log("❌ Browser or page did not open.")
-                return
+            log("🟢 Starting main script loop...")
+            users = fetch_users_from_db(conn, limit=10)
+            
+            if not users:
+                log("ℹ️ لا يوجد مستخدمين جدد، التوقف لمدة 30 دقيقة...")
+                time.sleep(30 * 60)
+                continue
 
-            page.goto("https://mcn.jaco.live/auth/sign-in")
-            ensure_login(page)
-            click_invite_streamer(page)
-
-            while True:  # معالجة المستخدمين الجدد دفعة 10
-                users = fetch_users_from_db(conn, limit=10)
-                
-                if not users:
-                    log("ℹ️ لا يوجد مستخدمين جدد، التوقف لمدة 30 دقيقة...")
-                    time.sleep(30 * 60)  # 30 دقيقة
+            for user in users:
+                user_value = user.get("username")
+                if not user_value:
+                    log(f"⚠️ المستخدم {user} لا يحتوي على username صالح.")
                     continue
 
-                for user in users:
-                    user_value = user.get("username")
-                    if not user_value:
-                        log(f"⚠️ المستخدم {user} لا يحتوي على username صالح.")
-                        continue
+                while True:
+                    response_data = get_check_status(page, user_value)
+                    if response_data:
+                        data = response_data.get("data", {})
+                        break
+                    else:
+                        log(f"⚠️ خطأ في get_check_status للمستخدم {user_value}, إعادة تسجيل الدخول...")
+                        ensure_login(page)
+                        click_invite_streamer(page)
+                        time.sleep(3)
 
-                    while True:
-                        response_data = get_check_status(page, user_value)
-                        if response_data:
-                            data = response_data.get("data", {})
-                            break
-                        else:
-                            log(f"⚠️ خطأ في get_check_status للمستخدم {user_value}, إعادة تسجيل الدخول...")
-                            ensure_login(page)
-                            click_invite_streamer(page)
-                            time.sleep(3)
-
-                    update_user_status(conn, user_value, data)
-                    time.sleep(3)  # فاصل قبل المستخدم التالي
+                update_user_status(conn, user_value, data)
+                time.sleep(3)  # فاصل قبل المستخدم التالي
 
         except Exception as e:
             log(f"❌ Unexpected error in main program: {e}")
