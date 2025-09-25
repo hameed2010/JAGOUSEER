@@ -66,7 +66,7 @@ def launch_browser():
         p = sync_playwright().start()
         browser = p.chromium.launch_persistent_context(
             user_data_dir=USER_DATA_DIR,
-            headless=False,
+            headless=True,
             viewport={"width": 1280, "height": 800},
             java_script_enabled=True,
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -277,3 +277,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
