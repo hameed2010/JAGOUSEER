@@ -6,6 +6,7 @@ import traceback
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import mysql.connector
+from mysql.connector import Error
 import gspread
 import pandas as pd
 import requests
@@ -171,30 +172,69 @@ def get_check_status(page, user_value):
         log(f"❌ Error getting check status: {e}")
         return {}
 
-def fetch_users_from_db(limit=10):
-    """جلب أول N مستخدمين من جدول users_jaco الذين حالتهم NEW"""
+# ---------------- Database Functions ----------------
+def create_db_connection(retries=5, wait=3600):
+    for attempt in range(retries):
+        try:
+            conn = mysql.connector.connect(
+                host="82.197.82.21",
+                user="u758694318_bigo",
+                password="*A[Ph&3RdvMTCXu1",
+                database="u758694318_bigo",
+                connection_timeout=10
+            )
+            if conn.is_connected():
+                log("🟢 Database connected successfully")
+                return conn
+        except Error as e:
+            log(f"❌ Database connection error (attempt {attempt+1}/{retries}): {e}")
+            time.sleep(wait)
+    log("❌ Failed to connect to DB after multiple attempts.")
+    return None
+
+def fetch_users_from_db(conn, limit=10):
+    if conn is None:
+        log("❌ No DB connection available for fetching users")
+        return []
+
     try:
-        conn = mysql.connector.connect(
-            host="82.197.82.21",
-            user="u758694318_bigo",
-            password="*A[Ph&3RdvMTCXu1",
-            database="u758694318_bigo"
-        )
         cursor = conn.cursor(dictionary=True)
         cursor.execute(f"SELECT * FROM users_jaco WHERE status='new' LIMIT {limit};")
         rows = cursor.fetchall()
+        cursor.close()
         return rows
-    except Exception as e:
+    except Error as e:
         log(f"❌ Error fetching users from DB: {e}")
         return []
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+
+def update_user_status(conn, username, data):
+    if conn is None:
+        log(f"❌ No DB connection available to update user {username}")
+        return
+
+    try:
+        cursor = conn.cursor()
+        required_keys = ["signed", "quality_anchor", "revenue_limit", "invite_limit"]
+        if all(data.get(k, 1) == 0 for k in required_keys):
+            cursor.execute(
+                "UPDATE users_jaco SET availability='available', status='verified' WHERE username=%s",
+                (username,)
+            )
+            log(f"✅ تم تحديث المستخدم {username}: availability=available، status=verified.")
+        else:
+            cursor.execute(
+                "UPDATE users_jaco SET status='verified' WHERE username=%s",
+                (username,)
+            )
+            log(f"⚠️ المستخدم {username} غير متاح، تم تحديث status فقط إلى 'verified'.")
+        conn.commit()
+        cursor.close()
+    except Error as e:
+        log(f"❌ Error updating user {username}: {e}")
 
 # ---------------- Main Program ----------------
 def main():
+    conn = create_db_connection()
     p, browser = launch_browser()
     page = open_page(browser, "https://mcn.jaco.live/auth/sign-in")
 
@@ -209,8 +249,8 @@ def main():
             ensure_login(page)
             click_invite_streamer(page)
 
-            while True:  # حلقة لمعالجة المستخدمين الجدد دفعة 10
-                users = fetch_users_from_db(limit=10)
+            while True:  # معالجة المستخدمين الجدد دفعة 10
+                users = fetch_users_from_db(conn, limit=10)
                 
                 if not users:
                     log("ℹ️ لا يوجد مستخدمين جدد، التوقف لمدة 30 دقيقة...")
@@ -218,58 +258,24 @@ def main():
                     continue
 
                 for user in users:
-                    user_value = user.get("username")  # فقط عمود username
+                    user_value = user.get("username")
                     if not user_value:
                         log(f"⚠️ المستخدم {user} لا يحتوي على username صالح.")
                         continue
 
-                    # ===== محاولة التحقق مع إعادة تسجيل الدخول عند الخطأ =====
                     while True:
                         response_data = get_check_status(page, user_value)
-                        if response_data:  # إذا نجحت العملية
-                            data = response_data.get("data", {})  # نأخذ فقط القسم data
+                        if response_data:
+                            data = response_data.get("data", {})
                             break
                         else:
                             log(f"⚠️ خطأ في get_check_status للمستخدم {user_value}, إعادة تسجيل الدخول...")
                             ensure_login(page)
                             click_invite_streamer(page)
-                            time.sleep(3)  # فاصل قبل إعادة المحاولة
+                            time.sleep(3)
 
-                    # ===== تحديث قاعدة البيانات بعد نجاح get_check_status =====
-                    required_keys = ["signed", "quality_anchor", "revenue_limit", "invite_limit"]
-                    try:
-                        conn = mysql.connector.connect(
-                            host="82.197.82.21",
-                            user="u758694318_bigo",
-                            password="*A[Ph&3RdvMTCXu1",
-                            database="u758694318_bigo"
-                        )
-                        cursor = conn.cursor()
-
-                        if all(data.get(k) == 0 for k in required_keys):
-                            cursor.execute(
-                                "UPDATE users_jaco SET availability='available', status='verified' WHERE username=%s",
-                                (user_value,)
-                            )
-                            log(f"✅ تم تحديث المستخدم {user_value}: availability=available، status=verified.")
-                        else:
-                            cursor.execute(
-                                "UPDATE users_jaco SET status='verified' WHERE username=%s",
-                                (user_value,)
-                            )
-                            log(f"⚠️ المستخدم {user_value} غير متاح، تم تحديث status فقط إلى 'verified'.")
-                        
-                        conn.commit()
-                    except Exception as e:
-                        log(f"❌ خطأ عند تحديث قاعدة البيانات للمستخدم {user_value}: {e}")
-                    finally:
-                        if cursor:
-                            cursor.close()
-                        if conn:
-                            conn.close()
-                    
-                    # ===== فاصل زمني قبل المستخدم التالي =====
-                    time.sleep(3)
+                    update_user_status(conn, user_value, data)
+                    time.sleep(3)  # فاصل قبل المستخدم التالي
 
         except Exception as e:
             log(f"❌ Unexpected error in main program: {e}")
@@ -277,4 +283,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
