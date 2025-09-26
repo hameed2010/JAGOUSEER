@@ -194,28 +194,29 @@ def create_db_connection(retries=5, wait=5):
     return None
 
 def fetch_users_from_db(conn, limit=10):
-    if conn is None or not conn.is_connected():
-        log("❌ No DB connection available for fetching users")
-        return []
-
     try:
+        if conn is None or not conn.is_connected():
+            log("⚠️ DB connection lost, reconnecting...")
+            conn = create_db_connection()
+            if conn is None:
+                return conn, []
+
         cursor = conn.cursor(dictionary=True)
         cursor.execute(f"SELECT * FROM users_jaco WHERE status='new' LIMIT {limit};")
         rows = cursor.fetchall()
         cursor.close()
         log(f"🟢 Fetched {len(rows)} users from DB")
-        return rows
+        return conn, rows
     except Error as e:
         log(f"❌ Error fetching users from DB: {e}")
         print(traceback.format_exc())
-        return []
+        return conn, []
 
 def update_user_status(conn, username, data):
     if conn is None or not conn.is_connected():
         log(f"❌ No DB connection available to update user {username}")
         return
 
-    # إذا كانت البيانات ليست dict أو فارغة
     if not isinstance(data, dict) or not data:
         log(f"⚠️ بيانات غير صالحة أو فارغة للمستخدم {username}: {data}")
         try:
@@ -234,7 +235,6 @@ def update_user_status(conn, username, data):
     try:
         cursor = conn.cursor()
         required_keys = ["signed", "quality_anchor", "revenue_limit", "invite_limit"]
-        # تحقق من كل مفتاح في dict
         if all(data.get(k, 1) == 0 for k in required_keys):
             cursor.execute(
                 "UPDATE users_jaco SET availability='available', status='verified' WHERE username=%s",
@@ -272,7 +272,7 @@ def main():
     while True:
         try:
             log("🟢 Starting main script loop...")
-            users = fetch_users_from_db(conn, limit=10)
+            conn, users = fetch_users_from_db(conn, limit=10)
             
             if not users:
                 log("ℹ️ لا يوجد مستخدمين جدد، التوقف لمدة 30 دقيقة...")
@@ -297,7 +297,7 @@ def main():
                         time.sleep(3)
 
                 update_user_status(conn, user_value, data)
-                time.sleep(3)  # فاصل قبل المستخدم التالي
+                time.sleep(3)
 
         except Exception as e:
             log(f"❌ Unexpected error in main program: {e}")
